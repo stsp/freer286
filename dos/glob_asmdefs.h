@@ -7,6 +7,7 @@
 #define gate_exit_code __ASYM_L(gate_exit_code)
 #define gate_ldt_sel __ASYM_L(gate_ldt_sel)
 #define gate_ldt_alias __ASYM_L(gate_ldt_alias)
+#define gate_thunk_err __ASYM_L(gate_thunk_err)
 #define gate_gdt __ASYM(gate_gdt)
 #define gate_idt __ASYM(gate_idt)
 #define gate_entry __ASYM(gate_entry)
