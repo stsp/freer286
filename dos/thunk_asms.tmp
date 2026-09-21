@@ -1,0 +1,2 @@
+0	int ASMFUNC desc_probe(void);
+1	int ASMFUNC ne_enter(int cs, int ip, int ss, int sp, int ds, int es, int ax, int cx);
