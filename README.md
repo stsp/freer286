@@ -8,13 +8,14 @@ segmented NE** marked `ne_exetyp = 0x81`. The program talks to the extender
 through two DLLs in the OS/2 1.x style, PHAPI and DOSCALLS, and through
 plain `int 21h`.
 
-The real extender reads `SLDT` and writes descriptors straight into the
-tables, which is why it needs a pile of workarounds in dosemu2. This is a
-replacement loader that does the same job as an ordinary **DPMI client in
-ring 3**: every descriptor comes from DPMI calls, nothing touches the LDT
-by hand.
+run286 is an ordinary **DPMI client in ring 3** that does itself what
+RUN286.EXE does: it reads the NE image out of a bound executable, builds its
+segments as LDT descriptors, resolves its imports and enters it. PHAPI and
+DOSCALLS are implemented on top of DPMI, so the program ends up in ring 3
+with a DPMI host underneath it instead of in ring 0 with Phar Lap's own
+extender. Nothing here writes a descriptor table by hand.
 
-## What is here so far
+## What is here
 
 * `neexe.[ch]` — the bound-file and NE parsers. Finds the stub, the
   extender image, the DLL directory and the program's NE; reads the segment
@@ -23,14 +24,67 @@ by hand.
 * `neload.[ch]` — applying NE relocations: internal references including
   moveable segments through the entry table, imports by ordinal and by
   name, additive fixups and fixup chains.
+* `dos/` — the loader itself, built with dj64: the DPMI backend, PHAPI,
+  DOSCALLS and the interrupt gates.
 * `nedump.c` — a host-side harness. It lays the image out in malloc'ed
   memory, runs every relocation against a dummy backend and reports what it
-  found. Build it with `make` and run `./nedump [-v] <game.exe>`.
+  found. `test.sh` runs it over the three games.
+* `restub286.c` — a host tool that puts `run286.exe` in front of a bound
+  program, so the game starts as a DOS program of its own.
 
-The DPMI backend, PHAPI and DOSCALLS are next; the plan is to build the
-loader itself with dj64, the way comcom64 is built.
+## Building
 
-## Status
+    make               # host tools: nedump, restub286
+    make -C dos        # the loader, needs dj64dev installed
+
+With djstub installed as well, `make -C dos exe` builds `run286.exe`.
+
+## Running
+
+Put a `RUN286.CFG` next to the program, holding the image name on the first
+line; a second line of any text turns on a trace of every API call.
+
+    dosemu -dumb -K . -l <path>/dos/libtmp.so -g 1
+
+Or restub the game once and start it directly:
+
+    ./restub286 dos/run286.exe GAME.EXE GAME286.EXE
+
+## Memory
+
+The programs care where their memory lands, so the host's layout matters.
+BioForge builds its arena out of blocks it asks for one at a time and keeps
+only the ones ending below linear 30Mb, so DPMI memory has to be reachable
+below that. DosAllocLinMem takes its blocks from the linear pool DPMI 1.0
+keeps below `$_dpmi_base`, which means `$_dpmi_base` itself has to be under
+the ceiling. A layout that works under dosemu2:
+
+    $_ext_mem = (1024)
+    $_xms = (1024)
+    $_dpmi_base = (0x1e00000)
+
+With the default 32Mb base the same run reports Largest=0 and the game
+gives up on its arena.
+
+## Data files
+
+The games read their own data through DOS, so they have to be started in
+their installed directory, not next to a lone `.EXE`. BioForge takes every
+path from `RED.OPT`, whose `Dir=` line normally names the drive the
+installer wrote.
+
+BioForge wants the directory `Dir=` names to sit on a drive presented as a
+CDROM, or it stops at its own CD check; a plain directory does not satisfy
+it, even under the right volume label. It also wants `GameDir=` somewhere
+writable, since it builds its savegame directory there on the way up. With
+
+    $_hostfs_drives = "/path/to/BIOFORGE:c"
+
+and `Dir=` pointing into that drive it gets through the check, initialises
+its screen, palette, sound, music and both its interrupt handlers, and
+copies its initial game state into `GameDir\gamedat`.
+
+## Parser status
 
 ```
 $ ./nedump BIOFORGE.EXE
