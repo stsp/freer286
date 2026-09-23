@@ -1,6 +1,6 @@
 /*
  * Parsing of Phar Lap bound executables and of the NE images inside them.
- * This file is free software, GPL v2 or later.
+ * This file is under the MIT license, see LICENSE.
  */
 #include <string.h>
 #include <stdlib.h>

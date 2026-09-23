@@ -1,7 +1,7 @@
 /*
  * Host-side test harness: parse a bound 286|DOS-Extender executable,
  * lay its NE image out in memory and run every relocation against a
- * dummy backend. Free software, GPL v2 or later.
+ * dummy backend. MIT license, see LICENSE.
  */
 #include <stdio.h>
 #include <stdlib.h>

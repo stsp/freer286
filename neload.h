@@ -1,4 +1,4 @@
-/* Applying NE relocations. Free software, GPL v2 or later. */
+/* Applying NE relocations. MIT license, see LICENSE. */
 #ifndef NELOAD_H
 #define NELOAD_H
 

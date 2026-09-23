@@ -7,7 +7,7 @@
  * the DPMI host, which builds an iret frame in our bitness and enters
  * gate_entry below. Nothing here writes a descriptor table.
  *
- * Free software, GPL v2 or later.
+ * MIT license, see LICENSE.
  */
 #include <libc/asmdefs.h>
 #include "asm.h"

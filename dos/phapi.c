@@ -6,7 +6,7 @@
  * convention puts them there left to right, so the last one is nearest the
  * return address; the offsets below are counted from CALL_ARGS.
  *
- * Free software, GPL v2 or later.
+ * MIT license, see LICENSE.
  */
 #include <stdio.h>
 #include <string.h>

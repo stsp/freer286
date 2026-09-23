@@ -5,7 +5,7 @@
  * Built with dj64, so the C below is host-side 64bit code; everything the
  * program itself will see comes from DPMI calls and from fmemcpy1().
  *
- * Free software, GPL v2 or later.
+ * MIT license, see LICENSE.
  */
 #include <stdio.h>
 #include <stdarg.h>

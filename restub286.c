@@ -10,7 +10,7 @@
  *
  * This is a host tool, not part of the DOS side.
  *
- * Free software, GPL v2 or later.
+ * MIT license, see LICENSE.
  */
 #include <stdio.h>
 #include <stdlib.h>

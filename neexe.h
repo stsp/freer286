@@ -6,7 +6,7 @@
  * the P2 image of the extender itself, followed by a "DLLD" directory of
  * the DLLs bound into the file, followed by the NE image of the program.
  *
- * This file is free software, GPL v2 or later.
+ * This file is under the MIT license, see LICENSE.
  */
 #ifndef NEEXE_H
 #define NEEXE_H
