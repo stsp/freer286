@@ -1003,14 +1003,18 @@ int main(int argc, char **argv)
     unsigned entry_seg, ss_seg, sp;
     int i, rc;
 
-    if (!path && argc > 1 && argv[1][0] && strcmp(argv[1], "0") != 0 &&
-	    strcmp(argv[1], "1") != 0)
-	path = argv[1];
-    if (!path && argc > 0 && argv[0] && argv[0][0]) {
+    /* An image appended to ourselves wins over everything else: the rest of
+     * the command line then belongs to the program, not to us. Without this
+     * a restubbed game that takes switches, like "crus286 -x 43", would have
+     * its first switch taken for a file name. */
+    if (argc > 0 && argv[0] && argv[0][0]) {
 	self = slurp_self(argv[0], &size);
 	if (self)
 	    path = argv[0];
     }
+    if (!path && argc > 1 && argv[1][0] && strcmp(argv[1], "0") != 0 &&
+	    strcmp(argv[1], "1") != 0)
+	path = argv[1];
     if (!path)
 	path = read_cfg(cfg);
     if (!path) {
