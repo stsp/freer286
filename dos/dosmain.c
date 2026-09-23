@@ -5,7 +5,7 @@
  * Built with dj64, so the C below is host-side 64bit code; everything the
  * program itself will see comes from DPMI calls and from fmemcpy1().
  *
- * Free software, GPL v2 or later.
+ * MIT license, see LICENSE.
  */
 #include <stdio.h>
 #include <stdarg.h>
@@ -118,6 +118,10 @@ struct dos_ldr {
 static struct dos_ldr ldr;
 
 static uint8_t *slurp(const char *path, size_t *size);
+/* Low address space held back while the image is allocated, so that the
+ * program's own arena can have it instead. */
+#define LOW_RESERVE	(12 * 1024 * 1024)
+
 static int load_segments(struct module *m);
 static int commit_segments(struct module *m);
 static int dos_resolve_ord(void *ctx, const char *mod, uint16_t ord,
@@ -421,6 +425,9 @@ static void report_trap(struct call *c, int exception)
  * The ones a program hooks itself are left alone, and so are the two the
  * loader needs for itself.
  */
+static __dpmi_paddr exc_prev[EXC_SLOTS];
+static uint32_t exc_hooked;
+
 static void hook_exceptions(void)
 {
     unsigned i;
@@ -432,16 +439,85 @@ static void hook_exceptions(void)
 	    continue;
 	if (__dpmi_get_processor_exception_handler_vector(i, &pm) == -1)
 	    continue;
+	exc_prev[i] = pm;
 	pm.selector = gate_cs32;
 	pm.offset32 = exc_stubs + i * EXC_SLOT_SIZE;
-	__dpmi_set_processor_exception_handler_vector(i, &pm);
+	if (__dpmi_set_processor_exception_handler_vector(i, &pm) == 0)
+	    exc_hooked |= 1u << i;
     }
+}
+
+/*
+ * Give the vectors back before we go. Our stubs live in memory the host
+ * frees with us, and an exception taken on the way out lands on a
+ * selector that no longer exists: dosemu2 says "CS selector invalid" and
+ * takes the session down instead of letting the program exit.
+ */
+static void unhook_exceptions(void)
+{
+    unsigned i;
+
+    for (i = 0; i < EXC_SLOTS; i++) {
+	if (exc_hooked & (1u << i))
+	    __dpmi_set_processor_exception_handler_vector(i, &exc_prev[i]);
+    }
+    exc_hooked = 0;
+}
+
+/*
+ * Own int 21h in protected mode, ahead of the host.
+ *
+ * dj64 makes us a 32bit DPMI client, and a DPMI host is told the bitness
+ * once, for the client as a whole. The program is 16bit: where DOS takes
+ * a DS:DX it writes DX and leaves the high half of EDX as it found it, so
+ * the host follows a pointer built half from the program and half from
+ * whatever was there. The stub narrows the registers for calls made from
+ * 16bit code and passes ours through untouched.
+ */
+static int int21_hooked;
+
+static void hook_int21(void)
+{
+    __dpmi_paddr pm;
+
+    if (__dpmi_get_protected_mode_interrupt_vector(0x21, &pm) == -1) {
+	trc("run286: cannot read the int 21h vector, DOS calls from the "
+		"program may get a stray high half of edx\n");
+	return;
+    }
+    int21_prev[0] = pm.offset32 & 0xffff;
+    int21_prev[1] = pm.offset32 >> 16;
+    int21_prev[2] = pm.selector;
+    pm.selector = gate_cs32;
+    pm.offset32 = int21_stub;
+    if (__dpmi_set_protected_mode_interrupt_vector(0x21, &pm) == -1) {
+	trc("run286: cannot take the int 21h vector, DOS calls from the "
+		"program may get a stray high half of edx\n");
+	return;
+    }
+    int21_hooked = 1;
+    trc("run286: int 21h through our stub, chaining to %04x:%08x\n",
+	    int21_prev[2], (unsigned)(int21_prev[0] | (int21_prev[1] << 16)));
+}
+
+/* and back to whoever had it, for the same reason as the exceptions */
+static void unhook_int21(void)
+{
+    __dpmi_paddr pm;
+
+    if (!int21_hooked)
+	return;
+    pm.selector = int21_prev[2];
+    pm.offset32 = int21_prev[0] | (int21_prev[1] << 16);
+    __dpmi_set_protected_mode_interrupt_vector(0x21, &pm);
+    int21_hooked = 0;
 }
 
 /* What the LDT alias says about one entry, for a fault that names it. */
 static void dump_ldt_entry(const char *what, unsigned off)
 {
     unsigned alias = gate_ldt_alias & 0xffff;
+    unsigned char desc[8];
     char buf[32];
     char *p = buf;
     unsigned i;
@@ -453,6 +529,14 @@ static void dump_ldt_entry(const char *what, unsigned off)
     for (i = 0; i < 8; i++)
 	p += sprintf(p, "%02x ", _farpeekb(alias, off + i));
     trc("run286:   %s entry %#x: %s\n", what, off, buf);
+    /* the alias is what the program wrote; ask the host what it kept */
+    if (__dpmi_get_descriptor((off | 7), desc) == 0) {
+	for (i = 0, p = buf; i < 8; i++)
+	    p += sprintf(p, "%02x ", desc[i]);
+	trc("run286:   %s as the host has it: %s\n", what, buf);
+    } else {
+	trc("run286:   %s: the host will not show %#x\n", what, off | 7);
+    }
 }
 
 /*
@@ -757,20 +841,41 @@ static int read_cfg_trace(char *logp, size_t logsz)
     return n > 1;
 }
 
+/* Low address space held back while the image is allocated, so that the
+ * program's own arena can have it instead. */
+#define LOW_RESERVE	(12 * 1024 * 1024)
+
 static int load_segments(struct module *m)
 {
     const struct ne_image *ne = &m->ne;
     const uint8_t *file = m->file;
+    __dpmi_meminfo hole = {};
     unsigned long total = 0, off;
-    int i;
+    int i, ret;
 
     /* A 16bit selector cannot reach past 64K, so give every segment that
      * much room: DosReallocSeg() then only ever moves a limit, and nothing
      * the program holds a pointer into has to be copied anywhere. */
     total = (unsigned long)ne->cseg * SEG_STRIDE;
 
+    /*
+     * Where the image lands decides how much room is left below it, and
+     * the programs care: BioForge builds its arena out of blocks that end
+     * below linear 30Mb and throws away everything else. A host hands out
+     * address space in the order it is asked for, so take the low ground
+     * first, put the image above it, and give it straight back; the arena
+     * then gets the space the image would have stood on. A host with
+     * nothing to spare down there just says no, and we load where we
+     * would have loaded anyway.
+     */
+    hole.size = LOW_RESERVE;
+    if (__dpmi_allocate_memory(&hole) == -1)
+	hole.size = 0;
     m->mem.size = total;
-    if (__dpmi_allocate_memory(&m->mem) == -1) {
+    ret = __dpmi_allocate_memory(&m->mem);
+    if (hole.size)
+	__dpmi_free_memory(hole.handle);
+    if (ret == -1) {
 	trc("run286: cannot allocate %lu bytes of DPMI memory\n", total);
 	return -1;
     }
@@ -1009,9 +1114,9 @@ int main(int argc, char **argv)
 		ldt_size ? ldt_size - 1 : 0);
     }
     if (gate_thunk_err)
-	trc("run286: no THUNK_16_32x, DOS calls from the program may "
-		"get a stray high half of edx\n");
+	trc("run286: no THUNK_16_32x, narrowing DOS calls ourselves\n");
     hook_exceptions();
+    hook_int21();
     /* what a handler of the program's would have found in DS and ES had
      * it interrupted the program rather than us */
     int_ds = m->seg[m->ne.autodata - 1].sel;
@@ -1026,6 +1131,8 @@ int main(int argc, char **argv)
     trc("run286: back from the program after %u API calls, rc %d\n",
 	    l->ncall, rc);
     trace_interrupts("taken");
+    unhook_exceptions();
+    unhook_int21();
     ne_free(&m->ne);
     return 0;
 }

@@ -2,7 +2,7 @@
  * The API the program sees: PHAPI and the OS/2 1.x DOSCALLS subset that
  * the Phar Lap bound programs actually import.
  *
- * Free software, GPL v2 or later.
+ * MIT license, see LICENSE.
  */
 #ifndef RUN286_H
 #define RUN286_H

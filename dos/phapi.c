@@ -6,7 +6,7 @@
  * convention puts them there left to right, so the last one is nearest the
  * return address; the offsets below are counted from CALL_ARGS.
  *
- * Free software, GPL v2 or later.
+ * MIT license, see LICENSE.
  */
 #include <stdio.h>
 #include <string.h>
@@ -117,6 +117,12 @@ uint16_t ldt_sel_reg;
 static __dpmi_meminfo fake_gdt;
 static uint16_t fake_gdt_sel;
 
+/* what sgdt said, whole */
+static uint32_t gdt_base(void)
+{
+    return gate_gdt[1] | ((uint32_t)gate_gdt[2] << 16);
+}
+
 static int fake_gdt_init(void)
 {
     uint32_t off;
@@ -166,6 +172,11 @@ static int fake_gdt_init(void)
  * table it is really indexing is the LDT. Point the mapping there and its
  * writes land in the right place: dosemu2 catches them on the alias page
  * and applies them itself, in msdos_ldt.c.
+ *
+ * Only where sgdt really did read back zero, though. On a host that
+ * answers it honestly the wrapper has already found the tables by
+ * itself, and a request for low memory is a request for low memory: it
+ * maps the first 64K to reach the BIOS data and the vectors.
  */
 static uint16_t dos_map_lin_seg(struct call *c)
 {
@@ -173,7 +184,7 @@ static uint16_t dos_map_lin_seg(struct call *c)
     uint32_t size = call_argd(c, 4);
     uint32_t lin = call_argd(c, 8);
 
-    if (lin < 0x1000) {
+    if (lin < 0x1000 && !gdt_base()) {
 	if (fake_gdt_init() != 0)
 	    return ERROR_NOT_ENOUGH_MEMORY;
 	return map_seg(fake_gdt.address + lin, size, selp);
@@ -235,6 +246,19 @@ static int lin_alloc(__dpmi_meminfo *m, uint32_t size)
     return __dpmi_allocate_linear_memory(m, 1);
 }
 
+/*
+ * The probe below only asks whether the address space is there, so it
+ * takes the block uncommitted: a host that really hands out the pages
+ * walks its page tables for every step of the search, and the search
+ * runs again after every allocation.
+ */
+static int lin_try(__dpmi_meminfo *m, uint32_t size)
+{
+    m->size = size;
+    m->address = 0;
+    return __dpmi_allocate_linear_memory(m, 0);
+}
+
 static uint32_t lin_probe(void)
 {
     __dpmi_meminfo m = {};
@@ -243,7 +267,7 @@ static uint32_t lin_probe(void)
     while (hi - lo > 0x1000) {
 	uint32_t mid = lo + (hi - lo) / 2;
 
-	if (lin_alloc(&m, mid & ~0xfff) == 0) {
+	if (lin_try(&m, mid & ~0xfff) == 0) {
 	    __dpmi_free_memory(m.handle);
 	    lo = mid;
 	} else {

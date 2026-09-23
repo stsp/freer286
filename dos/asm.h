@@ -2,7 +2,7 @@
  * Declarations shared between the C and the asm halves of the loader.
  * This is the PDHDR that thunk_gen reads, so keep it to declarations.
  *
- * Free software, GPL v2 or later.
+ * MIT license, see LICENSE.
  */
 #ifndef RUN286_ASM_H
 #define RUN286_ASM_H

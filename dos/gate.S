@@ -7,7 +7,7 @@
  * the DPMI host, which builds an iret frame in our bitness and enters
  * gate_entry below. Nothing here writes a descriptor table.
  *
- * Free software, GPL v2 or later.
+ * MIT license, see LICENSE.
  */
 #include <libc/asmdefs.h>
 #include "asm.h"
@@ -33,18 +33,17 @@ _ne_enter:
     movw %ss, %ax
     movl %eax, _gate_ret_ss
 
-    /* dj64 enters us with a far call frame, so the args start at 0xc */
-    movl 12(%ebp), %eax			/* cs */
+    movl ARG1, %eax			/* cs */
     movw %ax, _gate_jmp + 2
-    movl 16(%ebp), %eax			/* ip */
+    movl ARG2, %eax			/* ip */
     movw %ax, _gate_jmp
-    movl 32(%ebp), %eax			/* es */
-    movl 20(%ebp), %edx			/* ss */
-    movl 24(%ebp), %ebx			/* sp */
-    movl 28(%ebp), %esi			/* ds */
+    movl ARG6, %eax			/* es */
+    movl ARG3, %edx			/* ss */
+    movl ARG4, %ebx			/* sp */
+    movl ARG5, %esi			/* ds */
     movl %eax, %es
-    movl 36(%ebp), %eax			/* ax: the environment selector */
-    movl 40(%ebp), %ecx			/* cx: size of the data segment */
+    movl ARG7, %eax			/* ax: the environment selector */
+    movl ARG8, %ecx			/* cx: size of the data segment */
     /* from here on our own DS is gone; everything is read through %cs: */
     movl %esi, %ds
     movl %edx, %ss
@@ -86,7 +85,7 @@ _desc_probe:
     popl %edi
     popl %esi
     popl %ebx
-    lret
+    RET_I
 
 /*
  * The int 0x66 handler. Entered from the program's 16bit stub with a 32bit
@@ -147,7 +146,7 @@ _gate_entry:
     popl %esi
     popl %ebx
     popl %ebp
-    lret
+    RET_I
 
 /*
  * One stub per hooked interrupt. The host enters these in our bitness,
@@ -157,6 +156,10 @@ _gate_entry:
  * above any 16bit segment. A 286 extender hands its client a 16bit
  * stack, so do the same.
  */
+/* the C half indexes these by slot, so the first one has to sit on a
+ * slot boundary too: .balign inside the loop aligns to the section,
+ * not to the label */
+.balign INT_SLOT_SIZE
 .global _int_stubs
 _int_stubs:
 .set int_n, 0
@@ -227,6 +230,72 @@ _int_common:
     ljmpw *%cs:_int_target(, %ecx, 4)
 
 /*
+ * int 21h, on the way to whoever had the vector.
+ *
+ * We are a 32bit DPMI client because dj64 makes us one, but the program
+ * is 16bit and writes only DX where DOS is handed a DS:DX. The host, told
+ * once that the client is 32bit, reads the whole of EDX and follows a
+ * pointer built half from the program and half from whatever was in the
+ * high word. A 286 extender owns int 21h and passes on 16bit registers,
+ * so do that here: narrow them when the interrupted code is 16bit, and
+ * leave our own calls alone.
+ */
+.global _int21_stub
+_int21_stub:
+    pushl %eax
+    pushfl
+    lar 12(%esp), %eax			/* the interrupted CS */
+    jnz 1f				/* unreadable: not ours to judge */
+    testl $0x400000, %eax		/* the D bit, so 32bit code */
+    jnz 1f
+    popfl
+    popl %eax
+    movzwl %ax, %eax
+    movzwl %bx, %ebx
+    movzwl %cx, %ecx
+    movzwl %dx, %edx
+    movzwl %si, %esi
+    movzwl %di, %edi
+    movzwl %bp, %ebp
+    cmpb $0x62, %ah			/* Get PSP: comes back a paragraph */
+    je 2f
+    ljmpl *%cs:_int21_prev
+1:
+    popfl
+    popl %eax
+    ljmpl *%cs:_int21_prev
+
+    /*
+     * A DPMI host passes DOS calls to real mode as they are, so the few
+     * that answer with a segment answer with a paragraph, and the program
+     * loads it into a segment register. dosemu2 turns those into
+     * selectors in its msdos plugin; nothing does it on a plain host, so
+     * do it here. The call itself goes back through this stub, which
+     * lets it through because the caller is now our own 32bit code.
+     *
+     * Which host we are on is asked of the answer rather than of the
+     * host: lar tells a live selector from a paragraph, and a paragraph
+     * that would pass for one has to be a descriptor we could load, RPL
+     * and all.
+     *
+     * The flags the caller sees are its own: Get PSP has no status to
+     * report.
+     */
+2:
+    int $0x21
+    pushl %eax
+    movzwl %bx, %ebx
+    lar %ebx, %eax
+    jz 3f				/* a selector already */
+    movl $0x0002, %eax			/* DPMI: segment to descriptor */
+    int $0x31
+    jc 3f
+    movzwl %ax, %ebx
+3:
+    popl %eax
+    iretl
+
+/*
  * Where the program's handler irets to, in a 16bit segment of its own so
  * that a 16bit iret lands on it. Puts back the stack we came from and
  * returns to the host.
@@ -253,6 +322,7 @@ _int_ret16:
  * return address, the error code and the faulting frame on the stack it
  * chose; we do not return, we report and unwind ne_enter().
  */
+.balign EXC_SLOT_SIZE
 .global _exc_stubs
 _exc_stubs:
 .set exc_n, 0
@@ -286,7 +356,7 @@ _exc_common:
     popl %esi
     popl %ebx
     popl %ebp
-    lret
+    RET_I
 
 .data
 
@@ -365,6 +435,9 @@ _int_last:	.long 0
 _int_last_ss:	.long 0
 .global _int_last_esp
 _int_last_esp:	.long 0
+.global _int21_prev
+_int21_prev: .word 0, 0, 0
+
 .global _gate_thunk_err
 _gate_thunk_err: .long 0
 _gate_thunk_name: .asciz "THUNK_16_32x"

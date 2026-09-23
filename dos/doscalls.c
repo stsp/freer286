@@ -4,7 +4,7 @@
  * arguments, so the byte counts in the table below are part of the ABI and
  * not a detail: a wrong one returns the program to the wrong address.
  *
- * Free software, GPL v2 or later.
+ * MIT license, see LICENSE.
  */
 #include <stdio.h>
 #include <stddef.h>
