@@ -58,7 +58,7 @@ static_assert(CONT_BASE * 2 <= STUB_NUM, "too many stubs");
 #define ID_RSP16 -1
 #define ID_RSP32 -2
 
-enum { C_NONE, C_RETF, C_RETF16, C_RETF32, C_IRET, C_IRET_EXT };
+enum { C_NONE, C_RETF, C_RETF16, C_RETF32, C_RETF_HOST, C_IRET, C_IRET_EXT };
 
 struct msdos_ops {
     void (*fault)(cpuctx_t *scp, void *arg);
@@ -135,6 +135,7 @@ static int cont_kind(int id)
     switch (id) {
     case ID_FAULT:
     case ID_PAGEFAULT:
+	return C_RETF_HOST;
     case ID_API:
     case ID_WINOS2:
 	return C_RETF;
@@ -186,9 +187,59 @@ static void do_retf(cpuctx_t *scp)
     do_retf_x(scp, msdos.is_32());
 }
 
+/* With dosemu2's THUNK_16_32 the frames the host makes for our handlers
+ * are 32-bit ones, whatever the client: our code is 32-bit. */
+static int thunk_on;
+static int host_frame_32(void)
+{
+    return msdos.is_32() || thunk_on;
+}
+
+/* Chaining to a handler of the other bitness, which only THUNK_16_32
+ * gives a 16-bit client: the frame goes on in the bitness of that one. */
+static void chain_iret_frame(cpuctx_t *scp, unsigned short sel)
+{
+    int from32 = host_frame_32();
+    int to32 = msdos.is_32() || dpmi_segment_is32(sel);
+    uint32_t eip, cs, flags;
+
+    if (from32 == to32)
+	return;
+    if (from32) {
+	unsigned int *ssp = stk_adr(scp);
+	eip = ssp[0];
+	cs = ssp[1];
+	flags = ssp[2];
+	stk_add(scp, 6);
+	ssp = stk_adr(scp);
+	((unsigned short *)ssp)[0] = eip;
+	((unsigned short *)ssp)[1] = cs;
+	((unsigned short *)ssp)[2] = flags;
+    } else {
+	unsigned short *ssp = stk_adr(scp);
+	eip = ssp[0];
+	cs = ssp[1];
+	flags = ssp[2];
+	stk_add(scp, -6);
+	ssp = stk_adr(scp);
+	((unsigned int *)ssp)[0] = eip;
+	((unsigned int *)ssp)[1] = cs;
+	((unsigned int *)ssp)[2] = flags;
+    }
+}
+
+/* the code selector in the iret frame on the client's stack */
+static unsigned short caller_cs(cpuctx_t *scp)
+{
+    void *sp = stk_adr(scp);
+    if (host_frame_32())
+	return ((unsigned int *)sp)[1];
+    return ((unsigned short *)sp)[1];
+}
+
 static void do_dpmi_iret(cpuctx_t *scp)
 {
-    int is_32 = msdos.is_32();
+    int is_32 = host_frame_32();
     void *sp = stk_adr(scp);
     if (is_32) {
 	unsigned int *ssp = sp;
@@ -211,7 +262,7 @@ static void do_dpmi_iret(cpuctx_t *scp)
 static void do_ext_iret(cpuctx_t *scp, struct loop_s *l)
 {
     unsigned flags = _eflags;
-    int is_32 = msdos.is_32();
+    int is_32 = host_frame_32();
 
     _eflags = l->entry_flags;
     do_retf_x(scp, is_32);
@@ -414,7 +465,7 @@ static void run_call_handler(int idx, cpuctx_t *scp)
 {
     int is_32 = msdos.is_32();
     struct RealModeCallStructure *rmreg =
-	    SEL_ADR_CLNT(_es, _edi, is_32);
+	    SEL_ADR_CLNT(_es, _edi, host_frame_32());
     msdos.cb_es = _es;
     msdos.cb_edi = _edi;
     msdos.rmcb_handler[idx](scp, rmreg, is_32, msdos.rmcb_arg[idx]);
@@ -424,7 +475,7 @@ static void run_ret_handler(int idx, cpuctx_t *scp)
 {
     int is_32 = msdos.is_32();
     struct RealModeCallStructure *rmreg =
-	    SEL_ADR_CLNT(msdos.cb_es, msdos.cb_edi, is_32);
+	    SEL_ADR_CLNT(msdos.cb_es, msdos.cb_edi, host_frame_32());
     msdos.rmcb_ret_handler[idx](scp, rmreg, is_32);
     _es = msdos.cb_es;
     _edi = msdos.cb_edi;
@@ -494,8 +545,8 @@ struct pmaddr_s doshlp_get_abort_helper(void)
     };
 }
 
-/* the host's DPMI_REINIT, for a 16-bit client that we turn into a 32-bit
- * one from its RSP call, see takeover() */
+/* the host's DPMI_REINIT, for a 16-bit client asking for one from its RSP
+ * call; the Phar Lap takeover does not need it, see enable_thunk() */
 static __dpmi_paddr reinit_entry;
 static int in_rsp16;
 
@@ -524,13 +575,18 @@ static void ext_call(cpuctx_t *scp, int off, struct loop_s *l)
 	doshlp_quit_dpmi(scp);
 	return;
     }
+    /* the translation looks at the bitness of the caller's code, as
+     * dosemu2 does with THUNK_16_32x: our own cs is not it */
+    _cs = caller_cs(scp);
     ret = msdos.ext_call(scp, &rmreg, rm_seg, msdos.ext_arg, off);
+    _cs = sa.cs;
     switch (ret.ret) {
     case MSDOS_NONE:
     case MSDOS_PM:
 	/* chain: the previous handler gets the client's iret frame and
 	 * the flags we were entered with */
 	_eflags = l->entry_flags;
+	chain_iret_frame(scp, ret.prev.selector);
 	_cs = ret.prev.selector;
 	_eip = ret.prev.offset32;
 	return;
@@ -544,7 +600,9 @@ static void ext_call(cpuctx_t *scp, int off, struct loop_s *l)
 	return;
     }
     do_restore(scp, &sa);
+    _cs = caller_cs(scp);
     pret = msdos.ext_ret(scp, &rmreg, rm_seg, off);
+    _cs = sa.cs;
     switch (pret.ret) {
     case POSTEXT_NONE:
 	break;
@@ -567,7 +625,9 @@ static int cur_clnt;
 
 static void int31_call(cpuctx_t *scp, struct loop_s *l)
 {
-    int is_32 = msdos.is_32();
+    /* THUNK_16_32: the 32-bit code of a 16-bit client passes EDX */
+    int is_32 = msdos.is_32() ||
+	    (thunk_on && dpmi_segment_is32(caller_cs(scp)));
     int num = _LO(bx);
     DPMI_INTDESC *p;
 
@@ -593,6 +653,7 @@ static void int31_call(cpuctx_t *scp, struct loop_s *l)
     p = &prev_int31[cur_clnt];
 
     _eflags = l->entry_flags;
+    chain_iret_frame(scp, p->selector);
     _cs = p->selector;
     _eip = p->offset32;
 }
@@ -631,6 +692,9 @@ static void run_stub(cpuctx_t *scp, int id, struct loop_s *l)
 	    break;
 	case C_RETF32:
 	    do_retf_x(scp, 1);
+	    break;
+	case C_RETF_HOST:
+	    do_retf_x(scp, host_frame_32());
 	    break;
 	case C_IRET:
 	    do_dpmi_iret(scp);
@@ -743,6 +807,8 @@ static int psp_path(unsigned psp, char *buf, int len)
     return i ? 0 : -1;
 }
 
+void msdos_set_thunk(int on);
+
 static int (*takeover_run)(const char *path);
 static int takeover_ready, takeover_pending;
 static char takeover_path[128];
@@ -754,6 +820,11 @@ static int takeover_main(void)
 
     /* the piece of our stack the RSP call came in on is left for good */
     cur_sp += STK_CHUNK;
+    /* our DOS calls are 32-bit ones in the 16-bit client, THUNK_16_32x:
+     * for our translation and for the host's */
+    msdos_set_thunk(1);
+    asm volatile("int $0x2f" : : "a" (0x168a), "b" (1),
+	    "S" ("THUNK_16_32x") : "memory", "cc");
     rc = takeover_path[0] ? takeover_run(takeover_path) : 1;
     asm volatile("int $0x21" : : "a" (0x4c00 | (rc & 0xff)));
     return rc;
@@ -761,7 +832,7 @@ static int takeover_main(void)
 
 /*
  * A new 16-bit client that turns out to be Phar Lap's extender entering
- * DPMI is made a 32-bit one in its RSP call, see rsp_call(). The first
+ * DPMI is marked in its RSP call, see rsp_call(). The first
  * time it calls us after that, we run its program with our own loader in
  * its place, and it never gets control back. Not in the RSP call itself:
  * the host would go on thinking the client is on its locked stack, and
@@ -775,9 +846,8 @@ static void takeover(void)
 }
 
 /*
- * Phar Lap's extender in the memory of a new 16-bit client. Nothing but
- * memory can be looked at yet: a DPMI call from our code would come back
- * through a 16-bit iret, to a 16-bit ip.
+ * Phar Lap's extender in the memory of a new 16-bit client, found in
+ * memory alone.
  */
 static int has_extender(unsigned psp)
 {
@@ -805,9 +875,25 @@ static int is_pharlap_client(unsigned psp)
 	    has_extender(READ_WORD(SEGOFF2LINEAR(psp, 0x16)));
 }
 
+/* dosemu2's THUNK_16_32: in a 16-bit client, a call from 32-bit code
+ * is a 32-bit one, and a 32-bit handler gets a 32-bit frame. It is for
+ * every client, so we turn it on once. */
+static int enable_thunk(void)
+{
+    __dpmi_paddr ext;
+
+    if (__dpmi_get_vendor_specific_api_entry_point("THUNK_16_32", &ext))
+	return 0;
+    asm volatile("lcall *%0" : : "m" (ext), "a" (0x0001) : "memory", "cc");
+    return 1;
+}
+
 void pmdapi_set_takeover(int (*run)(const char *path))
 {
     takeover_run = run;
+    thunk_on = enable_thunk();
+    if (!thunk_on)
+	error("MSDOS: no THUNK_16_32, 16-bit clients are left alone\n");
     __dpmi_get_vendor_specific_api_entry_point("DPMI_REINIT", &reinit_entry);
 }
 
@@ -821,27 +907,13 @@ static void rsp_call(cpuctx_t *scp, int is_32)
     int clnt = _LWORD(ebx);
 
     in_rsp16 = !is_32;
-    /* The extender goes no further: its program runs with our loader, as
-     * a 32-bit client, see takeover(). Make it one before anything else. */
-    if (!is_32 && op == 0 && takeover_run && reinit_entry.selector &&
-	    is_pharlap_client(_LWORD(esi))) {
-	/* The host's own code is behind a selector for each bitness, and
-	 * the one we asked for DPMI_REINIT with was the 32-bit one. The call
-	 * we are in returns to the 16-bit one. */
-	__dpmi_paddr ent = reinit_entry;
-	ent.selector = ((uint16_t *)stk_adr(scp))[1];
-	if (host_reinit(1, &ent, _ss, (_esp & 0xffff) - 0x100) == 0) {
-	    unsigned char d[8];
-	    /* The host goes on calling us through the code selector it made
-	     * from our 16-bit descriptor, with the 32-bit eip now: make that
-	     * selector our 32-bit code. */
-	    if (__dpmi_get_descriptor(_my_cs(), d) != -1)
-		__dpmi_set_descriptor(rsp16_sel, d);
-	    is_32 = 1;
-	    takeover_ready = 1;
-	}
-	in_rsp16 = 0;
-    }
+    /* The extender goes no further: its program runs with our loader,
+     * see takeover(). The client stays a 16-bit one: with THUNK_16_32 the
+     * host takes the calls of our 32-bit code as 32-bit ones, and gives
+     * our 32-bit handlers 32-bit frames. */
+    if (!is_32 && op == 0 && takeover_run && thunk_on &&
+	    is_pharlap_client(_LWORD(esi)))
+	takeover_ready = 1;
     pmdapi_rsp_pre(op, clnt, ds);
     if (is_32)
 	msdos.rsp_call32(scp, NULL);

@@ -11,8 +11,10 @@ a TSR to provide the API translation services to protected-mode programs.
 Here it is linked into run286.exe, and "run286 /tsr" installs it. It is
 then also what runs the programs bound to Phar Lap's 286|DOS-Extender,
 with no restubbing: the extender enters DPMI as a 16-bit client, the
-resident service provider call for it (rsp_call() in msdoshlp.c) makes
-it a 32-bit one with the host's DPMI_REINIT, and on the extender's first
-interrupt call after that run286's loader takes over, in the same client,
-on the same file. Needs dosemu2's DPMI 1.0 extensions (RSP with flags,
-DPMI_REINIT, the LDT monitor).
+resident service provider call for it (rsp_call() in msdoshlp.c) marks
+it, and on the extender's first interrupt call after that run286's loader
+takes over, in the same client, on the same file. The client stays 16-bit:
+pmdapi and run286 are 32-bit code, and with THUNK_16_32 the host gives
+them 32-bit frames and entries by the bitness of their code segment,
+THUNK_16_32x does the same in dosemu's own translator. Needs dosemu2's
+DPMI 1.0 extensions (RSP with flags, THUNK_16_32/x, the LDT monitor).

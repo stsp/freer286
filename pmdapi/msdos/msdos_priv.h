@@ -23,5 +23,6 @@ unsigned short get_scratch_seg(void);
 unsigned short scratch_seg(cpuctx_t *scp, int off, void *arg);
 far_t get_xms_call(void);
 int msdos_is_32(void);
+void msdos_set_thunk(int on);
 
 #endif

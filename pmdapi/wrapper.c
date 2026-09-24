@@ -515,17 +515,20 @@ int dpmi_install_rsp(struct RSPcall_s *callback)
 }
 
 /* dosemu2's LDT monitor lives behind its DPMI_API_extension, which
- * returns with a retf of the bitness of the current client */
+ * returns with a retf of the bitness of its code selector: the one of
+ * the current client, or of the caller with THUNK_16_32 */
 static int api_ext(unsigned eax, unsigned ebx, unsigned ecx, unsigned edx)
 {
     __dpmi_paddr api;
     static const char name[] = "LDT_MONITOR";
+    unsigned ar;
 
     if (__dpmi_get_vendor_specific_api_entry_point((char *)name, &api)) {
 	error("MSDOS: the DPMI host has no LDT monitor\n");
 	return -1;
     }
-    if (msdos_is_32())
+    asm("larl %1, %0" : "=r" (ar) : "r" ((unsigned)api.selector) : "cc");
+    if (ar & (1 << 22))
 	return ldtmon_call32(eax, ebx, ecx, edx, &api);
     return ldtmon_call16(eax, ebx, ecx, edx, &api);
 }
