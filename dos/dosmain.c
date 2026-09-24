@@ -21,35 +21,22 @@
 #include "run286.h"
 
 /*
- * The trace goes to the dosemu log through the dosemu helper interrupt
- * (int E6h, AL=13h prints the string at ES:DX), not through DOS: trc()
- * also runs from the program's interrupt handlers, and a write to a file
- * there re-enters DOS whenever the tick lands inside a DOS call.
+ * The trace goes to the dosemu log through the dosemu helper interrupt,
+ * see log.S, not through DOS: trc() also runs from the program's interrupt
+ * handlers, and a write to a file there re-enters DOS whenever the tick
+ * lands inside a DOS call.
  */
 int run286_trace;
-static int trc_seg = -1;
 
 void trc(const char *fmt, ...)
 {
     char buf[1024];
-    __dpmi_regs r;
     va_list ap;
-    int sel;
 
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    if (trc_seg == -1) {
-	trc_seg = __dpmi_allocate_dos_memory(sizeof(buf) / 16, &sel);
-	if (trc_seg == -1)
-	    return;
-    }
-    dosmemput(buf, strlen(buf) + 1, trc_seg * 16);
-    memset(&r, 0, sizeof(r));
-    r.x.ax = 0x13;
-    r.x.es = trc_seg;
-    r.x.dx = 0;
-    __dpmi_int(0xe6, &r);
+    dosemu_log(buf);
 }
 
 /*
