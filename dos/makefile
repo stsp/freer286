@@ -4,7 +4,7 @@
 # The objects of the two targets do not mix: `make clean` in between.
 DJTGT ?= dj64
 VPATH = ..
-SOURCES = dosmain.c phapi.c doscalls.c neexe.c neload.c thunks_p.c thunks_a.c thunks_c.c
+SOURCES = dosmain.c phapi.c doscalls.c ldt.c neexe.c neload.c thunks_p.c thunks_a.c thunks_c.c
 AS_SOURCES = gate.S
 TGT = run286
 EXE = run286.exe

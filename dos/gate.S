@@ -416,6 +416,8 @@ _exc_common:
     /* a stack of our own: the one that faulted is not to be trusted */
     lss _gate_exc_stk, %esp
     call _run286_exception
+    testl %eax, %eax
+    jnz 1f
     /* there is no going back to a program that faulted */
     lss _gate_ret, %esp
     movl _gate_exit_code, %eax
@@ -424,6 +426,23 @@ _exc_common:
     popl %ebx
     popl %ebp
     RET_I
+    /* handled, or the program's to handle: back onto the host's stack
+     * with the registers as they are now in the frame */
+1:
+    movl _gate_exc_ss, %edx
+    movw %dx, %ss
+    movl _gate_exc_esp, %esp
+    cmpl $2, %eax
+    popl %ds
+    popl %es
+    popl %fs
+    popl %gs
+    popal
+    leal 4(%esp), %esp			/* the number the stub pushed */
+    je 2f
+    lret
+2:
+    ljmpl *%cs:_exc0d_prog
 
 .data
 
@@ -570,3 +589,9 @@ _int10_stack_end:
 .balign 4
 .global _int21_psp_para
 _int21_psp_para: .long 0
+
+/* the program's own #GP handler, offset and selector, which a fault that
+ * is not a write to the LDT goes on to */
+.balign 4
+.global _exc0d_prog
+_exc0d_prog: .word 0, 0, 0

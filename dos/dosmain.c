@@ -779,7 +779,7 @@ static void dump_ldt_entry(const char *what, unsigned off)
  * then what the host put there: the address to return to, the error code
  * and the frame that faulted.
  */
-void ASMCFUNC run286_exception(void)
+int ASMCFUNC run286_exception(void)
 {
     unsigned ss = gate_exc_ss;
     unsigned sp = gate_exc_esp;
@@ -796,6 +796,11 @@ void ASMCFUNC run286_exception(void)
     char *p = code;
     unsigned i;
 
+    /* the program writing its LDT, which it may only read */
+    if (n == 0x0d && ldt_write_fault(ss, sp))
+	return 1;
+    if (n == 0x0d && exc0d_prog[2])
+	return 2;
     trc("run286: exception %#x at %04x:%08x, error %#x, flags %#x\n",
 	    n, (uint16_t)cs, eip, err, fl);
     trc("run286:   its stack %04x:%08x, ours %04x:%08x, calls served %u\n",
@@ -830,7 +835,9 @@ void ASMCFUNC run286_exception(void)
     dump_ldt_entry("ss", fss & 0xfff8);
     trc("run286:   %u interrupts taken, the last in slot %u on stack %04x:%08x\n",
 	    int_taken, int_last, (uint16_t)int_last_ss, int_last_esp);
+    ldt_report();
     gate_exit_code = 1;
+    return 0;
 }
 
 /* Called from gate_entry once the program enters a stub. Returns nonzero to
@@ -1334,6 +1341,14 @@ int main(int argc, char **argv)
 	trc("run286: ldtr %04x, ldt alias %04x at %#x limit %#x\n",
 		gate_ldt_sel & 0xffff, alias, ldt_base,
 		ldt_size ? ldt_size - 1 : 0);
+	/*
+	 * Only dosemu2 has an alias the program can write through, and only
+	 * because it watches the page. Everywhere else, and there too unless
+	 * asked not to, the program gets a shadow to read and we apply its
+	 * writes ourselves (ldt.c).
+	 */
+	if ((!alias || !getenv("RUN286_HOST_LDT")) && ldt_shadow_init() != 0)
+	    trc("run286: no memory for the ldt shadow\n");
     }
     if (gate_thunk_err)
 	trc("run286: no THUNK_16_32x, narrowing DOS calls ourselves\n");
@@ -1355,6 +1370,7 @@ int main(int argc, char **argv)
     trc("run286: back from the program after %u API calls, rc %d\n",
 	    l->ncall, rc);
     trace_interrupts("taken");
+    ldt_report();
     unhook_exceptions();
     unhook_int21();
     unhook_int10();

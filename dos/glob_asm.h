@@ -44,3 +44,4 @@ __ASM(unsigned, int10_ss) SEMIC			/* stack the interrupt came on */
 __ASM(unsigned, int10_esp) SEMIC
 __ASM_FUNC(int10_stack_end) SEMIC
 __ASM(unsigned, int21_psp_para) SEMIC		/* AH=62h answers with a paragraph */
+__ASM_ARR(uint16_t, exc0d_prog, 3) SEMIC	/* the program's own #GP handler */

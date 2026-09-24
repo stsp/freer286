@@ -74,6 +74,7 @@ static uint16_t map_seg(uint32_t base, uint32_t size, uint32_t selp)
 	__dpmi_free_ldt_descriptor(sel);
 	return ERROR_INVALID_PARAMETER;
     }
+    ldt_make_ro(sel);			/* the program reads the LDT, we write it */
     call_setw(selp, sel);
     return 0;
 }
@@ -174,9 +175,13 @@ static int fake_gdt_init(void)
  * and applies them itself, in msdos_ldt.c.
  *
  * Only where sgdt really did read back zero, though. On a host that
- * answers it honestly the wrapper has already found the tables by
- * itself, and a request for low memory is a request for low memory: it
- * maps the first 64K to reach the BIOS data and the vectors.
+ * answers it honestly a request for low memory is a request for low
+ * memory: it maps the first 64K to reach the BIOS data and the vectors.
+ * There what it asks for is the real GDT, at the address sgdt gave, and
+ * it gets our page instead, as the real LDT is the host's and no plain
+ * DPMI host lets a client write it. The wrapper runs sgdt with a 16bit
+ * operand, which keeps 24 bits of the base: HDPMI's GDT at 0xff80e000
+ * arrives as 0x80e000, so only those bits are compared.
  */
 static uint16_t dos_map_lin_seg(struct call *c)
 {
@@ -184,10 +189,13 @@ static uint16_t dos_map_lin_seg(struct call *c)
     uint32_t size = call_argd(c, 4);
     uint32_t lin = call_argd(c, 8);
 
-    if (lin < 0x1000 && !gdt_base()) {
+    if ((lin < 0x1000 && !gdt_base()) ||
+	    (ldt_shadow_on && gdt_base() &&
+	    (lin & 0xffffff) == (gdt_base() & 0xffffff))) {
 	if (fake_gdt_init() != 0)
 	    return ERROR_NOT_ENOUGH_MEMORY;
-	return map_seg(fake_gdt.address + lin, size, selp);
+	return map_seg(fake_gdt.address + ((lin - gdt_base()) & 0xffffff),
+		size, selp);
     }
     return map_seg(lin, size, selp);
 }
@@ -819,6 +827,15 @@ static uint16_t dos_set_exception_handler(struct call *c)
     uint16_t exc = call_argw(c, 8);
     __dpmi_paddr pm;
 
+    /* a #GP is ours first, as writes to the LDT arrive as one; what is
+     * not ours goes on to the program's handler */
+    if (exc == 0x0d && ldt_shadow_on) {
+	call_setd(oldp, ((uint32_t)exc0d_prog[2] << 16) | exc0d_prog[0]);
+	exc0d_prog[0] = fn & 0xffff;
+	exc0d_prog[1] = 0;
+	exc0d_prog[2] = fn >> 16;
+	return 0;
+    }
     if (__dpmi_get_processor_exception_handler_vector(exc, &pm) == -1)
 	return ERROR_INVALID_PARAMETER;
     call_setd(oldp, ((uint32_t)pm.selector << 16) | (pm.offset32 & 0xffff));
