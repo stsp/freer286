@@ -30,6 +30,12 @@
 #define LDT_ENT		8
 #define AR_DATA16	0x00f2		/* data, writable */
 #define AR_DATA16_RO	0x00f0		/* data, read only */
+/* The program is told of 8191 entries, as many as the host gives out, but
+ * BioForge writes the 8192nd too, past the limit of its own alias. The
+ * shadow has room for it, so that write is caught and done like the
+ * others (a limit #GP decodes the same way); it just never reaches the
+ * host. */
+#define SHADOW_SIZE	0x10000
 
 int ldt_shadow_on;
 static __dpmi_meminfo shadow;
@@ -102,7 +108,7 @@ int ldt_shadow_init(void)
 int ldt_in_shadow(uint32_t lin)
 {
     return ldt_shadow_on && lin >= shadow.address &&
-	    lin < shadow.address + LDT_FULL_SIZE;
+	    lin < shadow.address + SHADOW_SIZE;
 }
 
 /* the program only ever gets to read the shadow */
@@ -145,7 +151,12 @@ static void ldt_apply(unsigned ent)
     } else {
 	d[5] |= 0x60;
     }
-    if (__dpmi_set_descriptor(sel, d) == -1 && ldt_refused++ < 16)
+    /* A host may show an entry it has not given out (dosemu2 does) and
+     * then refuse to set it: the program built a selector of its own in
+     * a free slot, as it may under a 286 extender, so take the slot. */
+    if (__dpmi_set_descriptor(sel, d) == -1 &&
+	    (__dpmi_allocate_specific_ldt_descriptor(sel) == -1 ||
+	    __dpmi_set_descriptor(sel, d) == -1) && ldt_refused++ < 16)
 	trc("run286: the host refused %04x: %02x %02x %02x %02x %02x %02x %02x %02x\n",
 		sel, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
 }
@@ -324,7 +335,7 @@ static void shadow_write(uint32_t lin, unsigned size, uint32_t v,
     uint32_t off = lin - shadow.address;
     unsigned i;
 
-    for (i = 0; i < size && off + i < LDT_FULL_SIZE; i++)
+    for (i = 0; i < size && off + i < SHADOW_SIZE; i++)
 	_farpokeb(shadow_sel, off + i, v >> (i * 8));
     if (off / LDT_ENT < *lo)
 	*lo = off / LDT_ENT;
@@ -340,7 +351,7 @@ static uint32_t shadow_read(uint32_t lin, unsigned size)
     uint32_t v = 0;
     unsigned i;
 
-    for (i = 0; i < size && off + i < LDT_FULL_SIZE; i++)
+    for (i = 0; i < size && off + i < SHADOW_SIZE; i++)
 	v |= (uint32_t)_farpeekb(shadow_sel, off + i) << (i * 8);
     return v;
 }
@@ -634,9 +645,29 @@ int ldt_write_fault(unsigned fss, unsigned fsp)
 
 void ldt_report(void)
 {
-    if (ldt_shadow_on)
-	trc("run286: ldt shadow: %u writes caught, %u entries applied, %u refused\n",
-		ldt_faults, ldt_writes, ldt_refused);
+    unsigned char d[LDT_ENT], h[LDT_ENT];
+    unsigned ent, diff = 0;
+
+    if (!ldt_shadow_on)
+	return;
+    trc("run286: ldt shadow: %u writes caught, %u entries applied, %u refused\n",
+	    ldt_faults, ldt_writes, ldt_refused);
+    /* where the shadow and the host part, ignoring the accessed bit */
+    for (ent = 1; ent < LDT_ENTRIES_USABLE; ent++) {
+	shadow_get(ent, d);
+	if (__dpmi_get_descriptor((ent << 3) | 7, h) == -1)
+	    memset(h, 0, sizeof(h));
+	d[5] |= 1;
+	h[5] |= 1;
+	if (!memcmp(d, h, LDT_ENT))
+	    continue;
+	if (diff++ < 24)
+	    trc("run286:   %04x shadow %02x%02x %02x%02x%02x %02x %02x%02x"
+		    " host %02x%02x %02x%02x%02x %02x %02x%02x\n", (ent << 3) | 7,
+		    d[1], d[0], d[7], d[4], d[3], d[5], d[6], d[2],
+		    h[1], h[0], h[7], h[4], h[3], h[5], h[6], h[2]);
+    }
+    trc("run286:   %u entries differ\n", diff);
 }
 
 /* ---- every descriptor call of ours, so the shadow stays true ---- */

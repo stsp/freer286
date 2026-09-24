@@ -177,15 +177,6 @@ _int_stubs:
 .endr
 
 _int_common:
-    /*
-     * Before anything that touches the stack. The per-vector counters
-     * below say which handler ran; this one says only that the host came
-     * here, so that "the host says it called us and our counter is zero"
-     * can be told apart from "the host never came". Read through %cs
-     * because our own DS is not loaded yet, and the stack is whatever the
-     * host left us, which is the thing in question.
-     */
-    incl %cs:_int_entered
     pushal
     pushl %ds
     pushl %es
@@ -193,6 +184,13 @@ _int_common:
     pushl %gs
     movl %cs:_gate_ds32, %eax
     movl %eax, %ds
+    /*
+     * Says only that the host came here, so that "the host says it called
+     * us and our counter is zero" can be told apart from "the host never
+     * came". Not through %cs before DS is loaded: a write through a code
+     * selector is a #GP on a CPU that checks segment rights.
+     */
+    incl _int_entered
     incl _int_taken
     /* the flags the host pushed, which the handler's iret will want */
     movl 60(%esp), %ebx

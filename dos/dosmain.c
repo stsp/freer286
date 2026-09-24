@@ -799,8 +799,18 @@ int ASMCFUNC run286_exception(void)
     /* the program writing its LDT, which it may only read */
     if (n == 0x0d && ldt_write_fault(ss, sp))
 	return 1;
-    if (n == 0x0d && exc0d_prog[2])
+    if (n == 0x0d && exc0d_prog[2]) {
+	static unsigned passed;
+
+	/* the program's to handle, but say which, for the first few */
+	if (passed++ < 16)
+	    trc("run286: #GP at %04x:%08x, error %#x, to the program: "
+		    "%02x %02x %02x %02x %02x %02x\n", (uint16_t)cs, eip, err,
+		    _farpeekb(cs, eip), _farpeekb(cs, eip + 1),
+		    _farpeekb(cs, eip + 2), _farpeekb(cs, eip + 3),
+		    _farpeekb(cs, eip + 4), _farpeekb(cs, eip + 5));
 	return 2;
+    }
     trc("run286: exception %#x at %04x:%08x, error %#x, flags %#x\n",
 	    n, (uint16_t)cs, eip, err, fl);
     trc("run286:   its stack %04x:%08x, ours %04x:%08x, calls served %u\n",
@@ -1359,6 +1369,10 @@ int main(int argc, char **argv)
     /* what a handler of the program's would have found in DS and ES had
      * it interrupted the program rather than us */
     int_ds = m->seg[m->ne.autodata - 1].sel;
+    /* The host made selectors of its own since the shadow was filled, the
+     * PSP's in probe_psp_answer() for one. An entry the shadow shows free
+     * is one the program may take for itself and overwrite. */
+    ldt_sync(0, LDT_ENTRIES_USABLE);
     trc("run286: entering %04x:%04x, stack %04x:%04x, ds %04x\n",
 	    m->seg[entry_seg - 1].sel, (unsigned)(m->ne.csip & 0xffff),
 	    m->seg[ss_seg - 1].sel, sp, m->seg[m->ne.autodata - 1].sel);
