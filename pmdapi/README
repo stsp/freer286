@@ -1,0 +1,18 @@
+PM DOS API translator allows the protected-mode program to call DOS
+services directly, via the familiar int 21h and similar techniques.
+While it may be a part of the DOS extender, the common practice is to
+put it directly into a DPMI server instead, to save the DOS extenders
+a great deal of work. Unfortunately, many DPMI servers do not contain
+the DOS API translator, and as a result, some DOS extenders fail to run.
+
+This is a port of dosemu's DOS API translator, that can be installed as
+a TSR to provide the API translation services to protected-mode programs.
+
+Here it is linked into run286.exe, and "run286 /tsr" installs it. It is
+then also what runs the programs bound to Phar Lap's 286|DOS-Extender,
+with no restubbing: the extender enters DPMI as a 16-bit client, the
+resident service provider call for it (rsp_call() in msdoshlp.c) makes
+it a 32-bit one with the host's DPMI_REINIT, and on the extender's first
+interrupt call after that run286's loader takes over, in the same client,
+on the same file. Needs dosemu2's DPMI 1.0 extensions (RSP with flags,
+DPMI_REINIT, the LDT monitor).

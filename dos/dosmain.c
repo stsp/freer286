@@ -19,6 +19,10 @@
 #include "neload.h"
 #include "asm.h"
 #include "run286.h"
+#ifdef WITH_PMDAPI
+int pmdapi_install(int (*run)(const char *path));
+static int resident_run(const char *path);
+#endif
 
 /*
  * The trace goes to the dosemu log through the dosemu helper interrupt,
@@ -28,6 +32,11 @@
  */
 int run286_trace;
 
+#ifdef WITH_PMDAPI
+int emu_printf(const char *format, ...);
+static int in_resident;
+#endif
+
 void trc(const char *fmt, ...)
 {
     char buf[1024];
@@ -36,6 +45,13 @@ void trc(const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+#ifdef WITH_PMDAPI
+    /* the resident's own int e6h in protected mode drops the string */
+    if (in_resident) {
+	emu_printf("%s", buf);
+	return;
+    }
+#endif
     dosemu_log(buf);
 }
 
@@ -1216,12 +1232,20 @@ static uint8_t *slurp_self(const char *self, size_t *size)
     return buf;
 }
 
+/* the program's own name when the resident runs it in its extender's
+ * place, see pmdapi_install() */
+static const char *forced_path;
+
 int main(int argc, char **argv)
 {
+#ifdef WITH_PMDAPI
+    if (argc == 2 && !strcasecmp(argv[1], "/tsr"))
+	return pmdapi_install(resident_run);
+#endif
     /* When dj64 loads us as a bare ELF, dosemu2 replaces the command line
      * with its own ("elfload2 0"), so the image to run comes from the
      * environment instead. A stubbed run286.exe will get a real argv. */
-    const char *path = getenv("RUN286_IMAGE");
+    const char *path = forced_path ?: getenv("RUN286_IMAGE");
     struct dos_ldr *l = &ldr;
     struct module *m = &l->mod[0];
     struct pl_bound b;
@@ -1238,7 +1262,7 @@ int main(int argc, char **argv)
      * the command line then belongs to the program, not to us. Without this
      * a restubbed game that takes switches, like "crus286 -x 43", would have
      * its first switch taken for a file name. */
-    if (argc > 0 && argv[0] && argv[0][0]) {
+    if (!forced_path && argc > 0 && argv[0] && argv[0][0]) {
 	self = slurp_self(argv[0], &size);
 	if (self)
 	    path = argv[0];
@@ -1378,3 +1402,14 @@ int main(int argc, char **argv)
     ne_free(&m->ne);
     return 0;
 }
+
+#ifdef WITH_PMDAPI
+static int resident_run(const char *path)
+{
+    char *argv[] = { (char *)path, NULL };
+
+    forced_path = path;
+    in_resident = 1;
+    return main(1, argv);
+}
+#endif
