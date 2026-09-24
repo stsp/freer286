@@ -15,30 +15,41 @@
 #include <sys/fmemcpy.h>
 #include <sys/segments.h>
 #include <sys/farptr.h>
+#include <sys/movedata.h>
 #include "neload.h"
 #include "asm.h"
 #include "run286.h"
 
 /*
- * The trace is long and the programs that need it run in a graphics mode,
- * where DOS stdout is not readable. Put it in a file next to the image when
- * RUN286_LOG names one.
+ * The trace goes to the dosemu log through the dosemu helper interrupt
+ * (int E6h, AL=13h prints the string at ES:DX), not through DOS: trc()
+ * also runs from the program's interrupt handlers, and a write to a file
+ * there re-enters DOS whenever the tick lands inside a DOS call.
  */
-static FILE *trace_fp;
 int run286_trace;
+static int trc_seg = -1;
 
 void trc(const char *fmt, ...)
 {
+    char buf[1024];
+    __dpmi_regs r;
     va_list ap;
+    int sel;
 
     va_start(ap, fmt);
-    if (trace_fp) {
-	vfprintf(trace_fp, fmt, ap);
-	fflush(trace_fp);
-    } else {
-	vprintf(fmt, ap);
-    }
+    vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+    if (trc_seg == -1) {
+	trc_seg = __dpmi_allocate_dos_memory(sizeof(buf) / 16, &sel);
+	if (trc_seg == -1)
+	    return;
+    }
+    dosmemput(buf, strlen(buf) + 1, trc_seg * 16);
+    memset(&r, 0, sizeof(r));
+    r.x.ax = 0x13;
+    r.x.es = trc_seg;
+    r.x.dx = 0;
+    __dpmi_int(0xe6, &r);
 }
 
 /*
@@ -811,13 +822,8 @@ static char *read_cfg(char *buf)
     return buf[0] ? buf : NULL;
 }
 
-/*
- * Second line of RUN286.CFG, if any, turns tracing on; a third line names
- * the file the trace goes to, which is the only way to read it when the
- * program has taken the screen into a graphics mode. Returns the name in
- * *logp, or leaves it alone.
- */
-static int read_cfg_trace(char *logp, size_t logsz)
+/* Second line of RUN286.CFG, if any, turns tracing on. */
+static int read_cfg_trace(void)
 {
     FILE *f = fopen("RUN286.CFG", "r");
     char buf[128];
@@ -825,18 +831,8 @@ static int read_cfg_trace(char *logp, size_t logsz)
 
     if (!f)
 	return 0;
-    while (fgets(buf, sizeof(buf), f)) {
-	char *p;
-
+    while (fgets(buf, sizeof(buf), f))
 	n++;
-	if (n != 3)
-	    continue;
-	p = strpbrk(buf, "\r\n");
-	if (p)
-	    *p = 0;
-	if (buf[0])
-	    snprintf(logp, logsz, "%s", buf);
-    }
     fclose(f);
     return n > 1;
 }
@@ -997,7 +993,6 @@ int main(int argc, char **argv)
     struct ne_reloc_stats st = {};
     const char *err = "";
     char cfg[128];
-    char logf[128] = "";
     uint8_t *file, *self = NULL;
     size_t size;
     unsigned entry_seg, ss_seg, sp;
@@ -1018,17 +1013,8 @@ int main(int argc, char **argv)
 	return 2;
     }
 
-    l->trace = getenv("RUN286_TRACE") != NULL || read_cfg_trace(logf,
-	    sizeof(logf));
+    l->trace = getenv("RUN286_TRACE") != NULL || read_cfg_trace();
     run286_trace = l->trace;
-    if (l->trace) {
-	const char *log = getenv("RUN286_LOG");
-
-	if (!log && logf[0])
-	    log = logf;
-	if (log)
-	    trace_fp = fopen(log, "w");
-    }
     trc("run286: loading %s\n", path);
     snprintf(m->name, sizeof(m->name), "%s", "PROGRAM");
     file = m->file = self ?: slurp(path, &size);

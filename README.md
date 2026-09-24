@@ -42,7 +42,8 @@ With djstub installed as well, `make -C dos exe` builds `run286.exe`.
 ## Running
 
 Put a `RUN286.CFG` next to the program, holding the image name on the first
-line; a second line of any text turns on a trace of every API call.
+line; a second line of any text turns on a trace of every API call, which
+goes to the dosemu log.
 
     dosemu -dumb -K . -l <path>/dos/libtmp.so -g 1
 
