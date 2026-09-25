@@ -33,6 +33,8 @@
 /* Switch to the program's 16bit stack and jump to its entry point. Returns
  * only once the program asks to terminate, with its exit code. */
 int ASMFUNC desc_probe(void);
+/* print the string to the dosemu log, see log.S */
+void ASMFUNC dosemu_log(const char *s);
 int ASMFUNC ne_enter(int cs, int ip, int ss, int sp, int ds, int es, int ax, int cx);
 
 /* Called from the int 0x66 handler when the program calls an import. The
@@ -40,8 +42,13 @@ int ASMFUNC ne_enter(int cs, int ip, int ss, int sp, int ds, int es, int ax, int
 int ASMCFUNC run286_import(void);
 
 /* Called from _exc_common when the program, or we, take a processor
- * exception. Says what happened and does not come back. */
-void ASMCFUNC run286_exception(void);
+ * exception. Returns 1 if it did what the faulting instruction meant to
+ * and the program goes on, 2 to pass it on to the program's own #GP
+ * handler, and 0 once it has said what happened: that one does not come
+ * back. */
+int ASMCFUNC run286_exception(void);
+void ASMCFUNC run286_snap(void);
+int ASMCFUNC run286_int10(void);
 
 #else
 

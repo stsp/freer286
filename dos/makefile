@@ -4,14 +4,17 @@
 # The objects of the two targets do not mix: `make clean` in between.
 DJTGT ?= dj64
 VPATH = ..
-SOURCES = dosmain.c phapi.c doscalls.c neexe.c neload.c thunks_p.c thunks_a.c thunks_c.c
-AS_SOURCES = gate.S
+SOURCES = dosmain.c phapi.c doscalls.c ldt.c neexe.c neload.c thunks_p.c thunks_a.c thunks_c.c
+AS_SOURCES = gate.S log.S
 TGT = run286
 EXE = run286.exe
 
 # the below vars must be named exactly like this for dj64.mk
 CFLAGS = -Wall -ggdb3 -I..
 DJCFLAGS = $(CFLAGS)
+ifeq ($(DJTGT),dj32)
+DJCFLAGS += -DWITH_PMDAPI
+endif
 OBJECTS = $(SOURCES:.c=.o)
 AS_OBJECTS = $(AS_SOURCES:.S=.o)
 PDHDR = asm.h
@@ -34,6 +37,17 @@ endif
 clean_dj64:
 else
 include $(DJMK)
+endif
+
+# Under dj32 the loader carries the resident too, see ../pmdapi:
+# "run286 /tsr" installs it, and a program bound to Phar Lap's extender
+# is then run by our loader in the extender's own DPMI client.
+ifeq ($(DJTGT),dj32)
+PMDAPI_A = ../pmdapi/libpmdapi.a
+$(XELF): $(PMDAPI_A)
+.PHONY: $(PMDAPI_A)
+$(PMDAPI_A):
+	$(MAKE) -C ../pmdapi
 endif
 
 $(TGT): $(DJ64_XLIB)

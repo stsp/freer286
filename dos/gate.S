@@ -46,8 +46,15 @@ _ne_enter:
     movl ARG8, %ecx			/* cx: size of the data segment */
     /* from here on our own DS is gone; everything is read through %cs: */
     movl %esi, %ds
-    movl %edx, %ss
-    movl %ebx, %esp
+    /*
+     * SS and ESP out of one instruction. Loaded one at a time there is a
+     * moment when the two do not belong together, and an interrupt
+     * arriving in it is pushed at an offset that is nowhere in the
+     * segment SS now holds. The pair goes on the stack we are leaving.
+     */
+    pushl %edx				/* the program's SS */
+    pushl %ebx				/* and its SP */
+    lss (%esp), %esp
     ljmpw *%cs:_gate_jmp
 
 /* int desc_probe(void) - what the machine says its tables are, and the
@@ -112,10 +119,9 @@ _gate_entry:
     call _run286_import
     testl %eax, %eax
     jnz 1f
-    popl %ecx				/* program ESP */
-    popl %edx				/* program SS */
-    movl %edx, %ss
-    movl %ecx, %esp
+    /* the program's stack, both halves at once: the two words are where
+     * the call was made from, in the order lss wants them */
+    lss (%esp), %esp
     /*
      * Origin's wrapper frees a descriptor while it is still in ES and
      * carries on with it: on a 286 the entry it freed was its own to
@@ -171,15 +177,6 @@ _int_stubs:
 .endr
 
 _int_common:
-    /*
-     * Before anything that touches the stack. The per-vector counters
-     * below say which handler ran; this one says only that the host came
-     * here, so that "the host says it called us and our counter is zero"
-     * can be told apart from "the host never came". Read through %cs
-     * because our own DS is not loaded yet, and the stack is whatever the
-     * host left us, which is the thing in question.
-     */
-    incl %cs:_int_entered
     pushal
     pushl %ds
     pushl %es
@@ -187,6 +184,13 @@ _int_common:
     pushl %gs
     movl %cs:_gate_ds32, %eax
     movl %eax, %ds
+    /*
+     * Says only that the host came here, so that "the host says it called
+     * us and our counter is zero" can be told apart from "the host never
+     * came". Not through %cs before DS is loaded: a write through a code
+     * selector is a #GP on a CPU that checks segment rights.
+     */
+    incl _int_entered
     incl _int_taken
     /* the flags the host pushed, which the handler's iret will want */
     movl 60(%esp), %ebx
@@ -200,8 +204,22 @@ _int_common:
     movl %ecx, _int_last
     /* and one counter per vector, so a handler that never runs shows up */
     incl _int_count(,%ecx,4)
+    /* the picture of the program's own timer objects, taken while the
+     * self-check is still counting: see run286_snap() */
     movl %eax, _int_last_ss
     movl %edx, _int_last_esp
+    testl %ecx, %ecx
+    jnz 8f
+    pushl %eax
+    pushl %ebx
+    pushl %ecx
+    pushl %edx
+    call _run286_snap
+    popl %edx
+    popl %ecx
+    popl %ebx
+    popl %eax
+8:
     /*
      * A 16bit stack of our own, as the extender would have given it.
      * Each vector gets its own piece of it: one interrupt arrives while
@@ -213,11 +231,13 @@ _int_common:
     shll $INT_STACK_SHIFT, %ebp
     movl _int_stk_esp, %esi
     subl %ebp, %esi
-    movl _int_stk_ss, %ebp
-    movw %bp, %ss
-    movl %esi, %esp
-    pushl %edx				/* the stack we came from */
+    /* onto it with one instruction, for the reason ne_enter gives */
+    pushl _int_stk_ss
+    pushl %esi
+    lss (%esp), %esp
+    /* the stack we came from, in the order lss will want it */
     pushl %eax
+    pushl %edx
     /* the frame the program's handler will iret from */
     pushw %bx
     pushw _int_ret_sel
@@ -273,10 +293,11 @@ _int21_stub:
      * do it here. The call itself goes back through this stub, which
      * lets it through because the caller is now our own 32bit code.
      *
-     * Which host we are on is asked of the answer rather than of the
-     * host: lar tells a live selector from a paragraph, and a paragraph
-     * that would pass for one has to be a descriptor we could load, RPL
-     * and all.
+     * Which host we are on is asked of the host once, at start up, and
+     * not of each answer: a paragraph can be a live selector too. The
+     * program's own segments fill the LDT from 0x1cf up, and Crusader's
+     * PSP sits at paragraph 0x027f, which is one of them, so a program
+     * that stores its environment into the PSP wrote over its own code.
      *
      * The flags the caller sees are its own: Get PSP has no status to
      * report.
@@ -284,9 +305,9 @@ _int21_stub:
 2:
     int $0x21
     pushl %eax
+    cmpl $0, %cs:_int21_psp_para
+    je 3f				/* the host answered with a selector */
     movzwl %bx, %ebx
-    lar %ebx, %eax
-    jz 3f				/* a selector already */
     movl $0x0002, %eax			/* DPMI: segment to descriptor */
     int $0x31
     jc 3f
@@ -296,6 +317,52 @@ _int21_stub:
     iretl
 
 /*
+ * int 10h, so that a VESA call made with a selector reaches the BIOS.
+ *
+ * A 286 extender knows which of its client's pointers are pointers and
+ * turns them into real mode ones before it goes down; a DPMI host hands
+ * the registers over as they are, so a program that points ES:DI at its
+ * own data gets the BIOS writing over whatever that number means as a
+ * segment. Crusader asks for the VESA information that way. What to do
+ * with the call is decided in C; a call we leave alone goes on to
+ * whoever had the vector.
+ */
+.global _int10_stub
+_int10_stub:
+    pushal
+    pushl %ds
+    pushl %es
+    pushl %fs
+    pushl %gs
+    movl %cs:_gate_ds32, %eax
+    movl %eax, %ds
+    movl %eax, %es
+    /* the program's stack is 16bit and C compiled for 32bit cannot run on
+     * one: keep where it was and move to ours, the way the exception
+     * stubs do. The saved registers stay where they are and the handler
+     * reads them through the segment we came on. */
+    movl %esp, _int10_esp
+    xorl %eax, %eax
+    movw %ss, %ax
+    movl %eax, _int10_ss
+    lss _int10_stk, %esp
+    call _run286_int10
+    testl %eax, %eax
+    movl _int10_ss, %edx
+    movw %dx, %ss
+    movl _int10_esp, %esp
+    popl %gs
+    popl %fs
+    popl %es
+    popl %ds
+    popal
+    jz 1f
+    iretl
+1:
+    ljmpl *%cs:_int10_prev
+
+
+/*
  * Where the program's handler irets to, in a 16bit segment of its own so
  * that a 16bit iret lands on it. Puts back the stack we came from and
  * returns to the host.
@@ -303,10 +370,8 @@ _int21_stub:
 .code16
 .global _int_ret16
 _int_ret16:
-    popl %eax				/* the stack we came from */
-    popl %edx
-    movw %ax, %ss
-    movl %edx, %esp
+    /* the stack we came from, both halves at once */
+    lss (%esp), %esp
     popl %gs
     popl %fs
     popl %es
@@ -349,6 +414,8 @@ _exc_common:
     /* a stack of our own: the one that faulted is not to be trusted */
     lss _gate_exc_stk, %esp
     call _run286_exception
+    testl %eax, %eax
+    jnz 1f
     /* there is no going back to a program that faulted */
     lss _gate_ret, %esp
     movl _gate_exit_code, %eax
@@ -357,6 +424,23 @@ _exc_common:
     popl %ebx
     popl %ebp
     RET_I
+    /* handled, or the program's to handle: back onto the host's stack
+     * with the registers as they are now in the frame */
+1:
+    movl _gate_exc_ss, %edx
+    movw %dx, %ss
+    movl _gate_exc_esp, %esp
+    cmpl $2, %eax
+    popl %ds
+    popl %es
+    popl %fs
+    popl %gs
+    popal
+    leal 4(%esp), %esp			/* the number the stub pushed */
+    je 2f
+    lret
+2:
+    ljmpl *%cs:_exc0d_prog
 
 .data
 
@@ -438,6 +522,12 @@ _int_last_esp:	.long 0
 .global _int21_prev
 _int21_prev: .word 0, 0, 0
 
+.global _int10_prev
+_int10_prev: .word 0, 0, 0
+
+
+
+
 .global _gate_thunk_err
 _gate_thunk_err: .long 0
 _gate_thunk_name: .asciz "THUNK_16_32x"
@@ -473,3 +563,33 @@ _exc_stack:
 .balign 16
 .global _exc_stack_end
 _exc_stack_end:
+
+/* Kept at the very end: the addresses in front of it are load bearing. */
+.balign 16
+_int10_stk:
+.global _int10_stk_esp
+_int10_stk_esp:	.long 0
+.global _int10_stk_ss
+_int10_stk_ss:	.long 0
+.global _int10_ss
+_int10_ss:	.long 0
+.global _int10_esp
+_int10_esp:	.long 0
+.balign 16
+_int10_stack:
+.rept 0x2000
+.byte 0
+.endr
+.balign 16
+.global _int10_stack_end
+_int10_stack_end:
+
+.balign 4
+.global _int21_psp_para
+_int21_psp_para: .long 0
+
+/* the program's own #GP handler, offset and selector, which a fault that
+ * is not a write to the LDT goes on to */
+.balign 4
+.global _exc0d_prog
+_exc0d_prog: .word 0, 0, 0
